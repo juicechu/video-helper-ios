@@ -15,6 +15,9 @@ class VideoDownloader: ObservableObject {
     @Published var statusMessage = ""
     @Published var alertMessage: String?
     @Published var showSettingsAlert = false
+    @Published var forceDownload = false
+
+    private let downloadedStore = DownloadedStore()
 
     func getVideoURLFromArgs() -> String? {
         let args = ProcessInfo.processInfo.arguments
@@ -46,6 +49,15 @@ class VideoDownloader: ObservableObject {
     }
 
     func downloadAndSave(urlString: String, completion: @escaping (Bool) -> Void) {
+        // Check if already downloaded (skip if force download)
+        if !forceDownload && downloadedStore.isDownloaded(urlString) {
+            DispatchQueue.main.async {
+                self.alertMessage = "Video already saved to Photos"
+                completion(true)
+            }
+            return
+        }
+
         // Try direct URL first, then try percent-encoding for non-ASCII characters
         let url: URL?
         if let directURL = URL(string: urlString) {
@@ -120,7 +132,7 @@ class VideoDownloader: ObservableObject {
                 }
 
                 try FileManager.default.moveItem(at: tempURL, to: destURL)
-                self.saveToPhotos(fileURL: destURL, completion: completion)
+                self.saveToPhotos(fileURL: destURL, originalUrlString: urlString, completion: completion)
             } catch {
                 DispatchQueue.main.async {
                     self.isDownloading = false
@@ -214,7 +226,7 @@ class VideoDownloader: ObservableObject {
         return fragment.addingPercentEncoding(withAllowedCharacters: .urlFragmentAllowed) ?? fragment
     }
 
-    private func saveToPhotos(fileURL: URL, completion: @escaping (Bool) -> Void) {
+    private func saveToPhotos(fileURL: URL, originalUrlString: String, completion: @escaping (Bool) -> Void) {
         DispatchQueue.main.async {
             self.statusMessage = "Saving to Photos..."
         }
@@ -238,6 +250,7 @@ class VideoDownloader: ObservableObject {
                 DispatchQueue.main.async {
                     self.isDownloading = false
                     if success {
+                        self.downloadedStore.markDownloaded(originalUrlString)
                         self.alertMessage = "Video saved to Photos"
                         self.statusMessage = "Done"
                         completion(true)

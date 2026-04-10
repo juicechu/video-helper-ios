@@ -21,30 +21,45 @@ struct ContentView: View {
     }
 
     var body: some View {
-        VStack(spacing: 20) {
-            // URL input with clear button
-            HStack {
-                TextField("Enter video URL", text: $urlText)
-                    .textFieldStyle(RoundedBorderTextFieldStyle())
-                    .focused($urlFieldFocused)
-                    .onSubmit {
-                        showHistory = false
-                    }
-
-                if !urlText.isEmpty {
-                    Button(action: {
-                        urlText = ""
-                    }) {
-                        Image(systemName: "xmark.circle.fill")
-                            .foregroundColor(.gray)
-                    }
-                    .buttonStyle(PlainButtonStyle())
+        ZStack {
+            Color.clear
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    urlFieldFocused = false
                 }
-            }
-            .padding(.horizontal)
 
-            // History list (when focused)
-            if urlFieldFocused && historyStore.urls.count > 0 && urlText.isEmpty {
+            VStack(spacing: 20) {
+                // URL input with clear button
+                HStack {
+                    TextField("Enter video URL", text: $urlText)
+                        .textFieldStyle(RoundedBorderTextFieldStyle())
+                        .focused($urlFieldFocused)
+                        .onSubmit {
+                            showHistory = false
+                        }
+                        .onChange(of: urlFieldFocused) { focused in
+                            if focused {
+                                showHistory = true
+                            }
+                        }
+                        .onChange(of: urlText) { _ in
+                            showHistory = false
+                        }
+
+                    if !urlText.isEmpty {
+                        Button(action: {
+                            urlText = ""
+                        }) {
+                            Image(systemName: "xmark.circle.fill")
+                                .foregroundColor(.gray)
+                        }
+                        .buttonStyle(PlainButtonStyle())
+                    }
+                }
+                .padding(.horizontal)
+
+                // History list (when focused)
+                if showHistory && historyStore.urls.count > 0 && urlText.isEmpty {
                 ScrollView {
                     VStack(spacing: 4) {
                         ForEach(historyStore.urls, id: \.self) { url in
@@ -70,6 +85,10 @@ struct ContentView: View {
             }
 
             Spacer()
+
+            // Force download toggle
+            Toggle("Force download", isOn: $downloader.forceDownload)
+                .padding(.horizontal)
 
             // Status message
             if !downloader.statusMessage.isEmpty {
@@ -105,6 +124,7 @@ struct ContentView: View {
             Spacer()
         }
         .padding()
+        }
         .alert(item: Binding<String?>(
             get: { downloader.alertMessage },
             set: { downloader.alertMessage = $0 }

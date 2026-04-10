@@ -11,7 +11,7 @@
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
-		EAB7BA082F8796AC006DAFD4 /* PBXFileSystemSynchronizedBuildFileExceptionSet */ = {
+		EAB7BA082F8796AC006DAFD4 /* Exceptions for "videohelper" folder in "videohelper" target */ = {
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
 				Info.plist,
@@ -24,7 +24,7 @@
 		EAB7B9FC2F8796A9006DAFD4 /* videohelper */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
 			exceptions = (
-				EAB7BA082F8796AC006DAFD4 /* PBXFileSystemSynchronizedBuildFileExceptionSet */,
+				EAB7BA082F8796AC006DAFD4 /* Exceptions for "videohelper" folder in "videohelper" target */,
 			);
 			path = videohelper;
 			sourceTree = "<group>";
