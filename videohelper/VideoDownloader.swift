@@ -16,6 +16,7 @@ class VideoDownloader: ObservableObject {
     @Published var alertMessage: String?
     @Published var showSettingsAlert = false
     @Published var forceDownload = false
+    @Published var downloadURL: String = ""
 
     private let downloadedStore = DownloadedStore()
 
@@ -49,6 +50,11 @@ class VideoDownloader: ObservableObject {
     }
 
     func downloadAndSave(urlString: String, completion: @escaping (Bool) -> Void) {
+        // Store URL for UI binding
+        DispatchQueue.main.async {
+            self.downloadURL = urlString
+        }
+
         // Check if already downloaded (skip if force download)
         if !forceDownload && downloadedStore.isDownloaded(urlString) {
             DispatchQueue.main.async {
@@ -63,8 +69,8 @@ class VideoDownloader: ObservableObject {
         if let directURL = URL(string: urlString) {
             url = directURL
         } else {
-            // Parse and encode URL components properly
-            url = parseAndEncodeURL(urlString)
+            // URL has unencoded non-ASCII chars. Encode only those, preserving existing %XX sequences.
+            url = URL(string: encodeUnencodedNonASCII(urlString))
         }
 
         guard let url = url else {
@@ -79,6 +85,8 @@ class VideoDownloader: ObservableObject {
             self.isDownloading = true
             self.statusMessage = "Downloading..."
         }
+
+        print("Downloading URL: \(url.absoluteString)")
 
         let task = URLSession.shared.downloadTask(with: url) { tempURL, response, error in
             guard let tempURL = tempURL, error == nil else {
@@ -146,13 +154,18 @@ class VideoDownloader: ObservableObject {
     }
 
     private func parseAndEncodeURL(_ urlString: String) -> URL? {
+        // First, decode any existing percent-encoding to get raw characters
+        // Then re-encode properly. This prevents double-encoding issues where
+        // already-encoded parts (like signatures) would get encoded again.
+        let decodedString = urlString.removingPercentEncoding ?? urlString
+
         // Find scheme separator
-        guard let schemeRange = urlString.range(of: "://") else {
+        guard let schemeRange = decodedString.range(of: "://") else {
             return nil
         }
 
-        let scheme = String(urlString[..<schemeRange.lowerBound])
-        let remainder = String(urlString[schemeRange.upperBound...])
+        let scheme = String(decodedString[..<schemeRange.lowerBound])
+        let remainder = String(decodedString[schemeRange.upperBound...])
 
         // Split host from path/query/fragment
         var host: String?
@@ -224,6 +237,51 @@ class VideoDownloader: ObservableObject {
         let fragment = fragmentWithHash.hasPrefix("#") ? String(fragmentWithHash.dropFirst()) : fragmentWithHash
         guard !fragment.isEmpty else { return nil }
         return fragment.addingPercentEncoding(withAllowedCharacters: .urlFragmentAllowed) ?? fragment
+    }
+
+    /// Encode only unencoded non-ASCII characters, preserving existing %XX sequences
+    private func encodeUnencodedNonASCII(_ urlString: String) -> String {
+        var result = ""
+        var i = urlString.startIndex
+
+        while i < urlString.endIndex {
+            let char = urlString[i]
+
+            // Check for existing percent-encoded sequence (%XX)
+            if char == "%" {
+                // Check if this is a valid %XX sequence
+                let nextIdx = urlString.index(i, offsetBy: 1)
+                let nextNextIdx = urlString.index(i, offsetBy: 2)
+
+                if nextIdx < urlString.endIndex && nextNextIdx < urlString.endIndex {
+                    let hex1 = urlString[nextIdx]
+                    let hex2 = urlString[nextNextIdx]
+
+                    if hex1.isHexDigit && hex2.isHexDigit {
+                        // Valid %XX sequence - preserve it
+                        result.append(char)
+                        result.append(hex1)
+                        result.append(hex2)
+                        i = urlString.index(after: nextNextIdx)
+                        continue
+                    }
+                }
+            }
+
+            // For non-ASCII characters (not in 0-127 range), encode them
+            if !char.isASCII {
+                let encoded = char.utf8.map { byte -> String in
+                    return "%" + String(byte, radix: 16).uppercased()
+                }.joined()
+                result.append(encoded)
+            } else {
+                result.append(char)
+            }
+
+            i = urlString.index(after: i)
+        }
+
+        return result
     }
 
     private func saveToPhotos(fileURL: URL, originalUrlString: String, completion: @escaping (Bool) -> Void) {

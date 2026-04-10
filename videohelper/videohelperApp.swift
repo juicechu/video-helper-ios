@@ -14,11 +14,12 @@ struct videohelperApp: App {
 
     var body: some Scene {
         WindowGroup {
-            ContentView(historyStore: historyStore)
+            ContentView(historyStore: historyStore, downloader: downloader)
                 .onAppear {
                     // Auto-download from launch arguments if enabled
                     if downloader.getAutoFlagFromArgs(),
                        let videoURL = downloader.getVideoURLFromArgs() {
+                        historyStore.add(videoURL)
                         downloader.downloadAndSave(urlString: videoURL) { success in
                             // App can close or minimize after download based on success
                             print("Auto-download completed with success: \(success)")

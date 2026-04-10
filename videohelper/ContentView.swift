@@ -8,16 +8,16 @@
 import SwiftUI
 
 struct ContentView: View {
-    @StateObject private var downloader: VideoDownloader
+    @ObservedObject var downloader: VideoDownloader
     @ObservedObject var historyStore: HistoryStore
 
     @State private var urlText = ""
     @State private var showHistory = false
     @FocusState private var urlFieldFocused: Bool
 
-    init(historyStore: HistoryStore, downloader: VideoDownloader = VideoDownloader()) {
-        self._downloader = StateObject(wrappedValue: downloader)
+    init(historyStore: HistoryStore, downloader: VideoDownloader) {
         self.historyStore = historyStore
+        self.downloader = downloader
     }
 
     var body: some View {
@@ -145,6 +145,11 @@ struct ContentView: View {
         } message: {
             Text("Please enable photo library access in Settings to save videos.")
         }
+        .onChange(of: downloader.downloadURL) { newURL in
+            if !newURL.isEmpty && urlText.isEmpty {
+                urlText = newURL
+            }
+        }
     }
 }
 
@@ -153,5 +158,7 @@ extension String: Identifiable {
 }
 
 #Preview {
-    ContentView(historyStore: HistoryStore(), downloader: VideoDownloader())
+    let downloader = VideoDownloader()
+    let historyStore = HistoryStore()
+    return ContentView(historyStore: historyStore, downloader: downloader)
 }
