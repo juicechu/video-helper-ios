@@ -9,6 +9,7 @@ import Foundation
 import Photos
 import UIKit
 import Combine
+import AVFoundation
 
 class VideoDownloader: ObservableObject {
     @Published var isDownloading = false
@@ -51,14 +52,16 @@ class VideoDownloader: ObservableObject {
 
     func downloadAndSave(urlString: String, completion: @escaping (Bool) -> Void) {
         // Store URL for UI binding
+        print("[VideoDownloader] Starting download for: \(urlString)")
         DispatchQueue.main.async {
             self.downloadURL = urlString
         }
 
         // Check if already downloaded (skip if force download)
         if !forceDownload && downloadedStore.isDownloaded(urlString) {
+            print("[VideoDownloader] URL already in downloaded history, skipping")
             DispatchQueue.main.async {
-                self.alertMessage = "Video already saved to Photos"
+                self.alertMessage = "This video was previously saved. Enable 'Force Download' to save again."
                 completion(true)
             }
             return
@@ -67,15 +70,18 @@ class VideoDownloader: ObservableObject {
         // Try direct URL first, then try percent-encoding for non-ASCII characters
         let url: URL?
         if let directURL = URL(string: urlString) {
+            print("[VideoDownloader] URL parsed directly without encoding")
             url = directURL
         } else {
             // URL has unencoded non-ASCII chars. Encode only those, preserving existing %XX sequences.
+            print("[VideoDownloader] URL contains unencoded characters, applying percent-encoding")
             url = URL(string: encodeUnencodedNonASCII(urlString))
         }
 
         guard let url = url else {
+            print("[VideoDownloader] ERROR: Failed to create URL from string")
             DispatchQueue.main.async {
-                self.alertMessage = "Invalid URL"
+                self.alertMessage = "Invalid URL format. Please check the URL."
                 completion(false)
             }
             return
@@ -86,13 +92,14 @@ class VideoDownloader: ObservableObject {
             self.statusMessage = "Downloading..."
         }
 
-        print("Downloading URL: \(url.absoluteString)")
+        print("[VideoDownloader] Requesting URL: \(url.absoluteString)")
 
         let task = URLSession.shared.downloadTask(with: url) { tempURL, response, error in
             guard let tempURL = tempURL, error == nil else {
+                print("[VideoDownloader] ERROR: Download failed - \(error?.localizedDescription ?? "Unknown error")")
                 DispatchQueue.main.async {
                     self.isDownloading = false
-                    self.alertMessage = "Download failed: \(error?.localizedDescription ?? "Unknown error")"
+                    self.alertMessage = "Download failed: \(error?.localizedDescription ?? "Check your network connection")"
                     completion(false)
                 }
                 return
@@ -102,21 +109,25 @@ class VideoDownloader: ObservableObject {
             guard let httpResponse = response as? HTTPURLResponse,
                   (200...299).contains(httpResponse.statusCode) else {
                 let statusCode = (response as? HTTPURLResponse)?.statusCode ?? -1
+                print("[VideoDownloader] ERROR: HTTP status \(statusCode)")
                 DispatchQueue.main.async {
                     self.isDownloading = false
-                    self.alertMessage = "Server returned error: \(statusCode)"
+                    self.alertMessage = "Server error (HTTP \(statusCode)). The video may be unavailable or requires authentication."
                 }
                 try? FileManager.default.removeItem(at: tempURL)
                 completion(false)
                 return
             }
 
+            print("[VideoDownloader] HTTP \(httpResponse.statusCode) - Content-Type: \(httpResponse.value(forHTTPHeaderField: "Content-Type") ?? "unknown")")
+
             // Check content type if available
             if let contentType = httpResponse.value(forHTTPHeaderField: "Content-Type"),
                !contentType.hasPrefix("video/") && !contentType.hasPrefix("application/octet-stream") {
+                print("[VideoDownloader] ERROR: Invalid content type: \(contentType)")
                 DispatchQueue.main.async {
                     self.isDownloading = false
-                    self.alertMessage = "Invalid content type: \(contentType)"
+                    self.alertMessage = "Invalid file type: \(contentType). Expected a video file."
                 }
                 try? FileManager.default.removeItem(at: tempURL)
                 completion(false)
@@ -130,21 +141,25 @@ class VideoDownloader: ObservableObject {
                 // Verify file has content
                 let attributes = try FileManager.default.attributesOfItem(atPath: tempURL.path)
                 guard let fileSize = attributes[.size] as? Int64, fileSize > 0 else {
+                    print("[VideoDownloader] ERROR: Downloaded file is empty")
                     DispatchQueue.main.async {
                         self.isDownloading = false
-                        self.alertMessage = "Downloaded file is empty"
+                        self.alertMessage = "Downloaded file is empty (0 bytes). The video may not exist or requires authentication."
                     }
                     try? FileManager.default.removeItem(at: tempURL)
                     completion(false)
                     return
                 }
 
+                print("[VideoDownloader] Downloaded \(fileSize) bytes to: \(tempURL.path)")
                 try FileManager.default.moveItem(at: tempURL, to: destURL)
+                print("[VideoDownloader] Moved to: \(destURL.path)")
                 self.saveToPhotos(fileURL: destURL, originalUrlString: urlString, completion: completion)
             } catch {
+                print("[VideoDownloader] ERROR: File operation failed - \(error.localizedDescription)")
                 DispatchQueue.main.async {
                     self.isDownloading = false
-                    self.alertMessage = "File error: \(error.localizedDescription)"
+                    self.alertMessage = "Failed to save downloaded file: \(error.localizedDescription)"
                     completion(false)
                 }
             }
@@ -285,36 +300,176 @@ class VideoDownloader: ObservableObject {
     }
 
     private func saveToPhotos(fileURL: URL, originalUrlString: String, completion: @escaping (Bool) -> Void) {
+        print("[VideoDownloader] Starting export to Photos")
         DispatchQueue.main.async {
-            self.statusMessage = "Saving to Photos..."
+            self.statusMessage = "Exporting video..."
         }
 
-        PHPhotoLibrary.requestAuthorization(for: .addOnly) { status in
-            guard status == .authorized else {
+        // Workaround for iOS Photos error 3302 (invalidResource)
+        // iOS Photos is stricter than AVPlayer - rejects non-standard container/codec/metadata
+        // First try Passthrough (fast), fallback to HighestQuality if still fails
+        self.exportAndSave(fileURL: fileURL, originalUrlString: originalUrlString, useHighestQuality: false, completion: completion)
+    }
+
+    private func exportAndSave(fileURL: URL, originalUrlString: String, useHighestQuality: Bool, completion: @escaping (Bool) -> Void) {
+        // Use 1280x720 preset for maximum compatibility while maintaining HD quality
+        // For streaming segments/fragmented MP4, quality-based presets may fail with "Operation Stopped"
+        // Resolution-based presets (640x480, 960x540, 1280x720) force complete re-encoding
+        let preset = useHighestQuality ? AVAssetExportPreset1280x720 : AVAssetExportPresetPassthrough
+        let asset = AVAsset(url: fileURL)
+        print("[VideoDownloader] Export preset: \(preset)")
+
+        // Check if asset has video tracks - if not, it's likely a non-video file or corrupted
+        asset.loadValuesAsynchronously(forKeys: ["tracks", "duration", "playable"]) {
+            var error: NSError?
+            let tracksStatus = asset.statusOfValue(forKey: "tracks", error: &error)
+            let playableStatus = asset.statusOfValue(forKey: "playable", error: &error)
+
+            print("[VideoDownloader] Asset loaded - tracks: \(tracksStatus), playable: \(playableStatus)")
+
+            guard tracksStatus == .loaded, playableStatus == .loaded else {
+                print("[VideoDownloader] ERROR: Failed to load asset - tracks: \(tracksStatus), playable: \(playableStatus)")
+                if let error = error {
+                    print("[VideoDownloader] Asset error: \(error.localizedDescription)")
+                }
+                // Asset couldn't be loaded - try fallback if we haven't already
+                if !useHighestQuality {
+                    print("[VideoDownloader] Retrying with HighestQuality preset")
+                    self.exportAndSave(fileURL: fileURL, originalUrlString: originalUrlString, useHighestQuality: true, completion: completion)
+                    return
+                }
                 DispatchQueue.main.async {
                     self.isDownloading = false
-                    self.showSettingsAlert = true
-                    completion(false)
+                    self.alertMessage = "Invalid video file: unable to read video tracks. The file may be corrupted or not a valid video."
                 }
+                try? FileManager.default.removeItem(at: fileURL)
+                completion(false)
                 return
             }
 
-            PHPhotoLibrary.shared().performChanges({
-                PHAssetCreationRequest.creationRequestForAssetFromVideo(atFileURL: fileURL)
-            }) { success, error in
-                // Cleanup temp file
+            let videoTracks = asset.tracks(withMediaType: .video)
+            print("[VideoDownloader] Video tracks found: \(videoTracks.count)")
+            guard !videoTracks.isEmpty else {
+                DispatchQueue.main.async {
+                    self.isDownloading = false
+                    self.alertMessage = "No video tracks found. The file may be audio-only or not a valid video."
+                }
                 try? FileManager.default.removeItem(at: fileURL)
+                completion(false)
+                return
+            }
+
+            // Proceed with export
+            self.performExport(asset: asset, fileURL: fileURL, preset: preset, originalUrlString: originalUrlString, useHighestQuality: useHighestQuality, completion: completion)
+        }
+    }
+
+    private func performExport(asset: AVAsset, fileURL: URL, preset: String, originalUrlString: String, useHighestQuality: Bool, completion: @escaping (Bool) -> Void) {
+        let exportURL = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".mp4")
+        print("[VideoDownloader] Export destination: \(exportURL.path)")
+
+        guard let exportSession = AVAssetExportSession(asset: asset, presetName: preset) else {
+            print("[VideoDownloader] ERROR: Failed to create export session")
+            DispatchQueue.main.async {
+                self.isDownloading = false
+                self.alertMessage = "Failed to initialize video export. Try again or use a different video."
+            }
+            try? FileManager.default.removeItem(at: fileURL)
+            completion(false)
+            return
+        }
+
+        exportSession.outputURL = exportURL
+        exportSession.outputFileType = .mp4
+        print("[VideoDownloader] Export started with fileType: MP4")
+
+        exportSession.exportAsynchronously {
+            print("[VideoDownloader] Export status: \(exportSession.status.rawValue)")
+            guard exportSession.status == .completed else {
+                let exportError = exportSession.error?.localizedDescription ?? "Unknown error"
+                print("[VideoDownloader] ERROR: Export failed - \(exportError)")
+                if let error = exportSession.error {
+                    print("[VideoDownloader] Export error details: \(error)")
+                }
+                try? FileManager.default.removeItem(at: exportURL)
+
+                // If Passthrough export failed, fallback to HighestQuality
+                if !useHighestQuality {
+                    print("[VideoDownloader] Falling back to HighestQuality preset")
+                    DispatchQueue.main.async {
+                        self.statusMessage = "Re-encoding video..."
+                    }
+                    self.exportAndSave(fileURL: fileURL, originalUrlString: originalUrlString, useHighestQuality: true, completion: completion)
+                    return
+                }
 
                 DispatchQueue.main.async {
                     self.isDownloading = false
-                    if success {
-                        self.downloadedStore.markDownloaded(originalUrlString)
-                        self.alertMessage = "Video saved to Photos"
-                        self.statusMessage = "Done"
-                        completion(true)
-                    } else {
-                        self.alertMessage = "Failed to save: \(error?.localizedDescription ?? "Unknown error")"
-                        completion(false)
+                    self.alertMessage = "Video export failed: \(exportError). The video format may be incompatible."
+                }
+                try? FileManager.default.removeItem(at: fileURL)
+                completion(false)
+                return
+            }
+
+            print("[VideoDownloader] Export completed successfully")
+            // Export succeeded, now save to Photos
+            // Only delete original file after successful export
+            if useHighestQuality {
+                try? FileManager.default.removeItem(at: fileURL)
+            }
+
+            PHPhotoLibrary.requestAuthorization(for: .addOnly) { status in
+                print("[VideoDownloader] Photo library authorization status: \(status.rawValue)")
+                guard status == .authorized else {
+                    print("[VideoDownloader] ERROR: Photo library access denied")
+                    DispatchQueue.main.async {
+                        self.isDownloading = false
+                        self.showSettingsAlert = true
+                    }
+                    try? FileManager.default.removeItem(at: exportURL)
+                    if !useHighestQuality { try? FileManager.default.removeItem(at: fileURL) }
+                    completion(false)
+                    return
+                }
+
+                DispatchQueue.main.async {
+                    self.statusMessage = "Saving to Photos..."
+                }
+
+                print("[VideoDownloader] Creating asset in Photos library")
+                PHPhotoLibrary.shared().performChanges({
+                    PHAssetCreationRequest.creationRequestForAssetFromVideo(atFileURL: exportURL)
+                }) { success, error in
+                    try? FileManager.default.removeItem(at: exportURL)
+
+                    DispatchQueue.main.async {
+                        self.isDownloading = false
+                        if success {
+                            print("[VideoDownloader] Video saved to Photos successfully")
+                            if !useHighestQuality { try? FileManager.default.removeItem(at: fileURL) }
+                            self.downloadedStore.markDownloaded(originalUrlString)
+                            self.alertMessage = "Video saved to Photos successfully!"
+                            self.statusMessage = "Done"
+                            completion(true)
+                        } else {
+                            print("[VideoDownloader] ERROR: Failed to save to Photos - \(error?.localizedDescription ?? "Unknown")")
+                            if let error = error {
+                                print("[VideoDownloader] Photos save error: \(error)")
+                            }
+                            // If Passthrough result still triggered 3302, fallback to HighestQuality
+                            if !useHighestQuality {
+                                print("[VideoDownloader] Retrying with re-encoding")
+                                DispatchQueue.main.async {
+                                    self.statusMessage = "Re-encoding video..."
+                                }
+                                self.exportAndSave(fileURL: fileURL, originalUrlString: originalUrlString, useHighestQuality: true, completion: completion)
+                                return
+                            }
+                            try? FileManager.default.removeItem(at: fileURL)
+                            self.alertMessage = "Failed to save to Photos: \(error?.localizedDescription ?? "Unknown error"). Please check Photos permissions."
+                            completion(false)
+                        }
                     }
                 }
             }
