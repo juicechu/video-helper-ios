@@ -67,16 +67,10 @@ class VideoDownloader: ObservableObject {
             return
         }
 
-        // Try direct URL first, then try percent-encoding for non-ASCII characters
-        let url: URL?
-        if let directURL = URL(string: urlString) {
-            print("[VideoDownloader] URL parsed directly without encoding")
-            url = directURL
-        } else {
-            // URL has unencoded non-ASCII chars. Encode only those, preserving existing %XX sequences.
-            print("[VideoDownloader] URL contains unencoded characters, applying percent-encoding")
-            url = URL(string: encodeUnencodedNonASCII(urlString))
-        }
+        // Encode unencoded chars (non-ASCII, spaces) preserving existing %XX sequences,
+        // then construct URL via URLComponents to prevent Foundation double-encoding %XX
+        let encodedString = encodeUnencodedNonASCII(urlString)
+        let url = constructURL(encodedString)
 
         guard let url = url else {
             print("[VideoDownloader] ERROR: Failed to create URL from string")
@@ -254,7 +248,7 @@ class VideoDownloader: ObservableObject {
         return fragment.addingPercentEncoding(withAllowedCharacters: .urlFragmentAllowed) ?? fragment
     }
 
-    /// Encode only unencoded non-ASCII characters, preserving existing %XX sequences
+    /// Encode unencoded characters invalid in URLs (non-ASCII, space, control chars), preserving existing %XX sequences
     private func encodeUnencodedNonASCII(_ urlString: String) -> String {
         var result = ""
         var i = urlString.startIndex
@@ -283,12 +277,18 @@ class VideoDownloader: ObservableObject {
                 }
             }
 
-            // For non-ASCII characters (not in 0-127 range), encode them
+            // Encode characters that need percent-encoding in URLs:
+            // - Non-ASCII characters (not in 0-127 range)
+            // - ASCII characters invalid in URLs: space (0x20) and control chars (0x00-0x1F, 0x7F)
             if !char.isASCII {
                 let encoded = char.utf8.map { byte -> String in
                     return "%" + String(byte, radix: 16).uppercased()
                 }.joined()
                 result.append(encoded)
+            } else if let ascii = char.asciiValue, ascii <= 0x20 || ascii == 0x7F {
+                let hex = String(ascii, radix: 16).uppercased()
+                let paddedHex = hex.count == 1 ? "0" + hex : hex
+                result.append("%" + paddedHex)
             } else {
                 result.append(char)
             }
@@ -297,6 +297,41 @@ class VideoDownloader: ObservableObject {
         }
 
         return result
+    }
+
+    /// Build URL from an already-percent-encoded string using URLComponents.
+    /// Using percentEncodedPath/percentEncodedQuery prevents Foundation from
+    /// double-encoding existing %XX sequences (e.g. %23 → %2523).
+    private func constructURL(_ encodedString: String) -> URL? {
+        guard let schemeRange = encodedString.range(of: "://") else { return nil }
+        let scheme = String(encodedString[..<schemeRange.lowerBound])
+        let remainder = String(encodedString[schemeRange.upperBound...])
+
+        var host = ""
+        var pathAndQuery = "/"
+
+        if let slashIndex = remainder.firstIndex(of: "/") {
+            host = String(remainder[..<slashIndex])
+            pathAndQuery = String(remainder[slashIndex...])
+        } else {
+            host = remainder
+        }
+
+        var path = pathAndQuery
+        var query: String? = nil
+
+        if let queryIndex = pathAndQuery.firstIndex(of: "?") {
+            path = String(pathAndQuery[..<queryIndex])
+            query = String(pathAndQuery[pathAndQuery.index(after: queryIndex)...])
+        }
+
+        var components = URLComponents()
+        components.scheme = scheme
+        components.host = host
+        components.percentEncodedPath = path
+        components.percentEncodedQuery = query
+
+        return components.url
     }
 
     private func saveToPhotos(fileURL: URL, originalUrlString: String, completion: @escaping (Bool) -> Void) {
