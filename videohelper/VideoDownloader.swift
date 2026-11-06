@@ -21,6 +21,31 @@ class VideoDownloader: ObservableObject {
 
     private let downloadedStore = DownloadedStore()
 
+    private enum MediaKind {
+        case video
+        case image(fileExtension: String)
+        case unsupported(reason: String)
+    }
+
+    /// Image formats Photos can store natively, mapped to the file extension to use on disk.
+    private static let supportedImageTypes: [String: String] = [
+        "image/jpeg": "jpg",
+        "image/jpg": "jpg",
+        "image/png": "png",
+        "image/gif": "gif",
+        "image/heic": "heic",
+        "image/heif": "heif"
+    ]
+
+    /// Image extensions we recognize but do not support (Photos cannot store them natively).
+    private static let unsupportedImageExtensions: Set<String> = [
+        "webp", "bmp", "tif", "tiff", "svg", "avif", "ico"
+    ]
+
+    private static let videoExtensions: Set<String> = [
+        "mp4", "mov", "m4v", "3gp"
+    ]
+
     func getVideoURLFromArgs() -> String? {
         let args = ProcessInfo.processInfo.arguments
 
@@ -50,6 +75,46 @@ class VideoDownloader: ObservableObject {
         return true
     }
 
+    /// Classify a download as video, image, or unsupported based on the response's
+    /// Content-Type, falling back to the URL path extension for generic responses.
+    private func classifyMedia(contentType: String?, url: URL) -> MediaKind {
+        let normalizedType = contentType.map { rawType in
+            let type = rawType.components(separatedBy: ";").first ?? rawType
+            return type.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        }
+
+        if let type = normalizedType, !type.isEmpty {
+            if let ext = Self.supportedImageTypes[type] {
+                return .image(fileExtension: ext)
+            }
+            if type.hasPrefix("image/") {
+                return .unsupported(reason: type)
+            }
+            if type.hasPrefix("video/") {
+                return .video
+            }
+            if type != "application/octet-stream" {
+                return .unsupported(reason: type)
+            }
+        }
+
+        // Content-Type is missing or generic: use the URL extension.
+        let pathExtension = url.pathExtension.lowercased()
+
+        if let ext = Self.supportedImageTypes["image/\(pathExtension)"] {
+            return .image(fileExtension: ext)
+        }
+        if Self.unsupportedImageExtensions.contains(pathExtension) {
+            return .unsupported(reason: ".\(pathExtension)")
+        }
+        if Self.videoExtensions.contains(pathExtension) {
+            return .video
+        }
+
+        // No usable type information: preserve the legacy behavior and treat it as video.
+        return .video
+    }
+
     func downloadAndSave(urlString: String, completion: @escaping (Bool) -> Void) {
         // Store URL for UI binding
         print("[VideoDownloader] Starting download for: \(urlString)")
@@ -61,7 +126,7 @@ class VideoDownloader: ObservableObject {
         if !forceDownload && downloadedStore.isDownloaded(urlString) {
             print("[VideoDownloader] URL already in downloaded history, skipping")
             DispatchQueue.main.async {
-                self.alertMessage = "This video was previously saved. Enable 'Force Download' to save again."
+                self.alertMessage = "This file was previously saved. Enable 'Force Download' to save again."
                 completion(true)
             }
             return
@@ -106,29 +171,40 @@ class VideoDownloader: ObservableObject {
                 print("[VideoDownloader] ERROR: HTTP status \(statusCode)")
                 DispatchQueue.main.async {
                     self.isDownloading = false
-                    self.alertMessage = "Server error (HTTP \(statusCode)). The video may be unavailable or requires authentication."
+                    self.alertMessage = "Server error (HTTP \(statusCode)). The file may be unavailable or requires authentication."
                 }
                 try? FileManager.default.removeItem(at: tempURL)
                 completion(false)
                 return
             }
 
-            print("[VideoDownloader] HTTP \(httpResponse.statusCode) - Content-Type: \(httpResponse.value(forHTTPHeaderField: "Content-Type") ?? "unknown")")
+            let contentType = httpResponse.value(forHTTPHeaderField: "Content-Type")
+            print("[VideoDownloader] HTTP \(httpResponse.statusCode) - Content-Type: \(contentType ?? "unknown")")
 
-            // Check content type if available
-            if let contentType = httpResponse.value(forHTTPHeaderField: "Content-Type"),
-               !contentType.hasPrefix("video/") && !contentType.hasPrefix("application/octet-stream") {
-                print("[VideoDownloader] ERROR: Invalid content type: \(contentType)")
+            let mediaKind = self.classifyMedia(contentType: contentType, url: url)
+
+            if case let .unsupported(reason) = mediaKind {
+                print("[VideoDownloader] ERROR: Unsupported file type: \(reason)")
                 DispatchQueue.main.async {
                     self.isDownloading = false
-                    self.alertMessage = "Invalid file type: \(contentType). Expected a video file."
+                    self.alertMessage = "Unsupported file type: \(reason). Supported formats: videos, JPEG, PNG, GIF, HEIC."
                 }
                 try? FileManager.default.removeItem(at: tempURL)
                 completion(false)
                 return
             }
 
-            let fileName = UUID().uuidString + ".mp4"
+            let fileExtension: String
+            switch mediaKind {
+            case .video:
+                fileExtension = "mp4"
+            case .image(let ext):
+                fileExtension = ext
+            case .unsupported:
+                return
+            }
+
+            let fileName = UUID().uuidString + "." + fileExtension
             let destURL = FileManager.default.temporaryDirectory.appendingPathComponent(fileName)
 
             do {
@@ -138,7 +214,7 @@ class VideoDownloader: ObservableObject {
                     print("[VideoDownloader] ERROR: Downloaded file is empty")
                     DispatchQueue.main.async {
                         self.isDownloading = false
-                        self.alertMessage = "Downloaded file is empty (0 bytes). The video may not exist or requires authentication."
+                        self.alertMessage = "Downloaded file is empty (0 bytes). The file may not exist or requires authentication."
                     }
                     try? FileManager.default.removeItem(at: tempURL)
                     completion(false)
@@ -148,7 +224,15 @@ class VideoDownloader: ObservableObject {
                 print("[VideoDownloader] Downloaded \(fileSize) bytes to: \(tempURL.path)")
                 try FileManager.default.moveItem(at: tempURL, to: destURL)
                 print("[VideoDownloader] Moved to: \(destURL.path)")
-                self.saveToPhotos(fileURL: destURL, originalUrlString: urlString, completion: completion)
+
+                switch mediaKind {
+                case .video:
+                    self.saveToPhotos(fileURL: destURL, originalUrlString: urlString, completion: completion)
+                case .image:
+                    self.saveImageToPhotos(fileURL: destURL, originalUrlString: urlString, completion: completion)
+                case .unsupported:
+                    break
+                }
             } catch {
                 print("[VideoDownloader] ERROR: File operation failed - \(error.localizedDescription)")
                 DispatchQueue.main.async {
@@ -344,6 +428,54 @@ class VideoDownloader: ObservableObject {
         // iOS Photos is stricter than AVPlayer - rejects non-standard container/codec/metadata
         // First try Passthrough (fast), fallback to HighestQuality if still fails
         self.exportAndSave(fileURL: fileURL, originalUrlString: originalUrlString, useHighestQuality: false, completion: completion)
+    }
+
+    private func saveImageToPhotos(fileURL: URL, originalUrlString: String, completion: @escaping (Bool) -> Void) {
+        print("[VideoDownloader] Starting image save to Photos")
+        DispatchQueue.main.async {
+            self.statusMessage = "Saving image to Photos..."
+        }
+
+        PHPhotoLibrary.requestAuthorization(for: .addOnly) { status in
+            print("[VideoDownloader] Photo library authorization status: \(status.rawValue)")
+            guard status == .authorized else {
+                print("[VideoDownloader] ERROR: Photo library access denied")
+                DispatchQueue.main.async {
+                    self.isDownloading = false
+                    self.showSettingsAlert = true
+                }
+                try? FileManager.default.removeItem(at: fileURL)
+                completion(false)
+                return
+            }
+
+            print("[VideoDownloader] Creating image asset in Photos library")
+            // addResource preserves the original file bytes, including animated GIF frames.
+            PHPhotoLibrary.shared().performChanges({
+                let request = PHAssetCreationRequest.forAsset()
+                request.addResource(with: .photo, fileURL: fileURL, options: nil)
+            }) { success, error in
+                try? FileManager.default.removeItem(at: fileURL)
+
+                DispatchQueue.main.async {
+                    self.isDownloading = false
+                    if success {
+                        print("[VideoDownloader] Image saved to Photos successfully")
+                        self.downloadedStore.markDownloaded(originalUrlString)
+                        self.alertMessage = "Image saved to Photos successfully!"
+                        self.statusMessage = "Done"
+                        completion(true)
+                    } else {
+                        print("[VideoDownloader] ERROR: Failed to save image to Photos - \(error?.localizedDescription ?? "Unknown")")
+                        if let error = error {
+                            print("[VideoDownloader] Photos save error: \(error)")
+                        }
+                        self.alertMessage = "Failed to save image to Photos: \(error?.localizedDescription ?? "Unknown error"). Please check Photos permissions."
+                        completion(false)
+                    }
+                }
+            }
+        }
     }
 
     private func exportAndSave(fileURL: URL, originalUrlString: String, useHighestQuality: Bool, completion: @escaping (Bool) -> Void) {

@@ -8,28 +8,17 @@
 import Foundation
 
 class DownloadedStore {
-    private let key = "downloadedUrls"
+    private let key = "lastDownloadedUrl"
 
     func isDownloaded(_ url: String) -> Bool {
-        let downloaded = getDownloadedUrls()
-        return downloaded.contains(url)
+        guard let lastUrl = UserDefaults.standard.string(forKey: key) else {
+            return false
+        }
+        return lastUrl == url
     }
 
     func markDownloaded(_ url: String) {
-        var downloaded = getDownloadedUrls()
-        if !downloaded.contains(url) {
-            downloaded.insert(url)
-            save(downloaded)
-        }
-    }
-
-    private func getDownloadedUrls() -> Set<String> {
-        let array = UserDefaults.standard.stringArray(forKey: key) ?? []
-        return Set(array)
-    }
-
-    private func save(_ urls: Set<String>) {
-        UserDefaults.standard.set(Array(urls), forKey: key)
+        UserDefaults.standard.set(url, forKey: key)
     }
 
     func clear() {
