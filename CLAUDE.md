@@ -11,13 +11,13 @@ This is an Xcode project. Build and run via Xcode IDE:
 
 ## Project Architecture
 
-iOS app (Swift/SwiftUI, minimum iOS 13.0) that downloads MP4 videos and saves to Photos album.
+iOS app (Swift/SwiftUI, minimum iOS 15.0) that downloads videos and images and saves them to the Photos library.
 
 ### Services
 
-- **VideoDownloader.swift** - Core service: URL argument parsing (`ProcessInfo.processInfo.arguments`), video download via `URLSession`, photo library save via `PHPhotoLibrary`. Handles URL encoding for non-ASCII characters.
+- **VideoDownloader.swift** - Core service: URL argument parsing (`ProcessInfo.processInfo.arguments`), media download via `URLSession`, content-type detection (video vs. image vs. unsupported), photo library save via `PHPhotoLibrary`. Handles URL encoding for non-ASCII characters. Supported images: JPEG, PNG, GIF, HEIC, HEIF; videos use the existing AVAsset export pipeline.
 - **HistoryStore.swift** - UserDefaults-backed URL history (max 50 items, most recent first, deduplication)
-- **DownloadedStore.swift** - UserDefaults-backed set of successfully downloaded URLs (prevents re-downloading same video)
+- **DownloadedStore.swift** - UserDefaults-backed record of the last successfully downloaded URL (prevents re-downloading the same video or image)
 
 ### Views
 
@@ -28,13 +28,15 @@ iOS app (Swift/SwiftUI, minimum iOS 13.0) that downloads MP4 videos and saves to
 
 App supports WebDriverAgent launch arguments:
 ```
--video_url <url>       # Required: URL to download
+-video_url <url>       # Required: URL to download (video or image)
 -auto <true|false>     # Optional: auto-download (defaults to true)
 ```
 
+The media type is detected from the HTTP `Content-Type`, so `-video_url` accepts image URLs too; no separate image flag exists.
+
 ### Permissions
 
-Info.plist requires `NSPhotoLibraryAddUsageDescription` for photo library access.
+Info.plist requires `NSPhotoLibraryAddUsageDescription` for photo library access (videos and images).
 
 ## Bundle ID
 

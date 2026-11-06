@@ -31,7 +31,7 @@ struct ContentView: View {
             VStack(spacing: 20) {
                 // URL input with clear button
                 HStack {
-                    TextField("Enter video URL", text: $urlText)
+                    TextField("Enter video or image URL", text: $urlText)
                         .textFieldStyle(RoundedBorderTextFieldStyle())
                         .focused($urlFieldFocused)
                         .onSubmit {
@@ -143,7 +143,7 @@ struct ContentView: View {
             }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("Please enable photo library access in Settings to save videos.")
+            Text("Please enable photo library access in Settings to save videos and images.")
         }
         .onChange(of: downloader.downloadURL) { newURL in
             if !newURL.isEmpty && urlText.isEmpty {
